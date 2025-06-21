@@ -3,12 +3,12 @@ name: likeUser (点赞特定用户)
 on:
   schedule:
     # 每天 UTC 时间 18:00 运行
-    - cron: "0 18 * * *"
+    - cron: '27 21 * * *'
   workflow_dispatch: # 允许手动触发
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 35 # 设置作业超时时间为20分钟
 
     strategy:
@@ -18,10 +18,31 @@ jobs:
       # 在作业级别设置环境变量
       USERNAMES: ${{ secrets.USERNAMES }}
       PASSWORDS: ${{ secrets.PASSWORDS }}
-      RUN_TIME_LIMIT_MINUTES: ${{secrets.RUN_TIME_LIMIT_MINUTES}}
-      TELEGRAM_BOT_TOKEN: ${{secrets.TELEGRAM_BOT_TOKEN}}
-      TELEGRAM_CHAT_ID: ${{secrets.TELEGRAM_CHAT_ID}}
-      SPECIFIC_USER: ${{secrets.SPECIFIC_USER}}
+      WEBSITE: ${{ secrets.WEBSITE }}
+      RUN_TIME_LIMIT_MINUTES: ${{ secrets.RUN_TIME_LIMIT_MINUTES }}
+      MAX_CONCURRENT_ACCOUNTS: ${{ secrets.MAX_CONCURRENT_ACCOUNTS }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
+      SPECIFIC_USER: ${{ secrets.SPECIFIC_USER }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      LIKE_SPECIFIC_USER: ${{ secrets.LIKE_SPECIFIC_USER }}
+      ENABLE_RSS_FETCH: ${{ secrets.ENABLE_RSS_FETCH }}
+      ENABLE_TOPIC_DATA_FETCH: ${{ secrets.ENABLE_TOPIC_DATA_FETCH }}
+      HEALTH_PORT: ${{ secrets.HEALTH_PORT }}
+      # 代理配置
+      PROXY_URL: ${{ secrets.PROXY_URL }}
+      PROXY_TYPE: ${{ secrets.PROXY_TYPE }}
+      PROXY_HOST: ${{ secrets.PROXY_HOST }}
+      PROXY_PORT: ${{ secrets.PROXY_PORT }}
+      PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+      PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+      # 数据库配置
+      POSTGRES_URI: ${{ secrets.POSTGRES_URI }}
+      COCKROACH_URI: ${{ secrets.COCKROACH_URI }}
+      NEON_URI: ${{ secrets.NEON_URI }}
+      AIVEN_MYSQL_URI: ${{ secrets.AIVEN_MYSQL_URI }}
+      MONGO_URI: ${{ secrets.MONGO_URI }}
     steps:
       - uses: actions/checkout@v3 # 检出仓库
 
@@ -30,38 +51,51 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - name: Cache node modules
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
       - name: Install dependencies
         run: |
           npm install
-          sudo apt install -y xvfb
       #github action设置的action环境变量会完全替换掉env文件的读取，所以需要在action里手动进行加载env文件
-      - name: Load environment variables
+      # - name: Load environment variables
+      #   run: |
+      #     echo "Debug: Checking if .env file exists..."
+
+      #     # 检查 .env 文件是否存在
+      #     if [ -f .env ]; then
+      #       echo ".env file found. Loading environment variables from .env file"
+            
+      #       # 加载 .env 文件中的默认值
+      #       set -a
+      #       source .env
+      #       set +a
+            
+      #       echo "Loaded .env variables:"
+      #     else
+      #       echo ".env file not found. Skipping loading."
+      #     fi
+
+
+      #     if [ -n "${{ secrets.WEBSITE }}" ] && [ ! -z "${{ secrets.WEBSITE }}" ]; then
+      #       echo "Using GitHub Secret for WEBSITE"
+      #       echo "WEBSITE=${{ secrets.WEBSITE }}" >> $GITHUB_ENV
+      #     else
+      #       echo "WEBSITE=${WEBSITE}" >> $GITHUB_ENV
+      #     fi
+
+      #   shell: bash
+
+      # - name: Run a script(linux)
+      #   run: LIKE_SPECIFIC_USER=true node bypasscf.js --USERNAMES "$USERNAMES" --PASSWORDS "$PASSWORDS" --WEBSITE "$WEBSITE"
+
+      - name: Run a script(windows)
         run: |
-          echo "Debug: Checking if .env file exists..."
-
-          # 检查 .env 文件是否存在
-          if [ -f .env ]; then
-            echo ".env file found. Loading environment variables from .env file"
-            
-            # 加载 .env 文件中的默认值
-            set -a
-            source .env
-            set +a
-            
-            echo "Loaded .env variables:"
-          else
-            echo ".env file not found. Skipping loading."
-          fi
-
-
-          if [ -n "${{ secrets.WEBSITE }}" ] && [ ! -z "${{ secrets.WEBSITE }}" ]; then
-            echo "Using GitHub Secret for WEBSITE"
-            echo "WEBSITE=${{ secrets.WEBSITE }}" >> $GITHUB_ENV
-          else
-            echo "WEBSITE=${WEBSITE}" >> $GITHUB_ENV
-          fi
-
-        shell: bash
-
-      - name: Run a script
-        run: LIKE_SPECIFIC_USER=true node bypasscf.js --USERNAMES "$USERNAMES" --PASSWORDS "$PASSWORDS" --WEBSITE "$WEBSITE"
+          $env:LIKE_SPECIFIC_USER="true"
+          node bypasscf.js 
+        shell: pwsh

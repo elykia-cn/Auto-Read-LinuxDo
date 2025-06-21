@@ -6,6 +6,16 @@ import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import TelegramBot from "node-telegram-bot-api";
+import fetch from "node-fetch";
+import { parseStringPromise } from "xml2js";
+import { parseRss } from "./src/parse_rss.js";
+import { processAndSaveTopicData } from "./src/topic_data.js";
+import {
+  getProxyConfig,
+  getPuppeteerProxyArgs,
+  testProxyConnection,
+  getCurrentIP,
+} from "./src/proxy_config.js";
 
 dotenv.config();
 
@@ -47,8 +57,9 @@ const shutdownTimer = setTimeout(() => {
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
+const groupId = process.env.TELEGRAM_GROUP_ID;
 const specificUser = process.env.SPECIFIC_USER || "14790897";
-const maxConcurrentAccounts = 4; // 每批最多同时运行的账号数
+const maxConcurrentAccounts = parseInt(process.env.MAX_CONCURRENT_ACCOUNTS) || 3; // 每批最多同时运行的账号数
 const usernames = process.env.USERNAMES.split(",");
 const passwords = process.env.PASSWORDS.split(",");
 const loginUrl = process.env.WEBSITE || "https://linux.do"; //在GitHub action环境里它不能读取默认环境变量,只能在这里设置默认值
@@ -58,12 +69,49 @@ const delayBetweenBatches =
   runTimeLimitMillis / Math.ceil(totalAccounts / maxConcurrentAccounts);
 const isLikeSpecificUser = process.env.LIKE_SPECIFIC_USER || "false";
 const isAutoLike = process.env.AUTO_LIKE || "true";
+const enableRssFetch = process.env.ENABLE_RSS_FETCH === "true"; // 是否开启抓取RSS，只有显式设置为 "true" 才开启
+const enableTopicDataFetch = process.env.ENABLE_TOPIC_DATA_FETCH === "true"; // 是否开启抓取话题数据，只有显式设置为 "true" 才开启
+
+console.log(
+  `RSS抓取功能状态: ${enableRssFetch ? "开启" : "关闭"} (ENABLE_RSS_FETCH=${
+    process.env.ENABLE_RSS_FETCH
+  })`
+);
+console.log(
+  `话题数据抓取功能状态: ${
+    enableTopicDataFetch ? "开启" : "关闭"
+  } (ENABLE_TOPIC_DATA_FETCH=${process.env.ENABLE_TOPIC_DATA_FETCH})`
+);
+
+// 代理配置
+const proxyConfig = getProxyConfig();
+if (proxyConfig) {
+  console.log(
+    `代理配置: ${proxyConfig.type}://${proxyConfig.host}:${proxyConfig.port}`
+  );
+
+  // 测试代理连接
+  console.log("正在测试代理连接...");
+  const proxyWorking = await testProxyConnection(proxyConfig);
+  if (proxyWorking) {
+    console.log("✅ 代理连接测试成功");
+  } else {
+    console.log("❌ 代理连接测试失败，将使用直连");
+  }
+} else {
+  console.log("未配置代理，使用直连");
+  const currentIP = await getCurrentIP();
+  if (currentIP) {
+    console.log(`当前IP地址: ${currentIP}`);
+  }
+}
+
 let bot;
-if (token && chatId) {
+if (token && (chatId || groupId)) {
   bot = new TelegramBot(token);
 }
 function sendToTelegram(message) {
-  if (!bot) return;
+  if (!bot || !chatId) return;
 
   bot
     .sendMessage(chatId, message)
@@ -71,8 +119,56 @@ function sendToTelegram(message) {
       console.log("Telegram message sent successfully");
     })
     .catch((error) => {
-      console.error("Error sending Telegram message:", error);
+      console.error(
+        "Error sending Telegram message:",
+        error && error.code ? error.code : "",
+        error && error.message
+          ? error.message.slice(0, 100)
+          : String(error).slice(0, 100)
+      );
     });
+}
+function sendToTelegramGroup(message) {
+  if (!bot || !groupId) {
+    console.error("sendToTelegramGroup: bot 或 groupId 不存在");
+    return;
+  }
+  // 过滤空内容，避免 Telegram 400 错误
+  if (!message || !String(message).trim()) {
+    console.warn("Telegram 群组推送内容为空，跳过发送");
+    return;
+  }
+  // 分割长消息，Telegram单条最大4096字符
+  const MAX_LEN = 4000;
+  if (typeof message === "string" && message.length > MAX_LEN) {
+    let start = 0;
+    let part = 1;
+    while (start < message.length) {
+      const chunk = message.slice(start, start + MAX_LEN);
+      bot
+        .sendMessage(groupId, chunk)
+        .then(() => {
+          console.log(`Telegram group message part ${part} sent successfully`);
+        })
+        .catch((error) => {
+          console.error(
+            `Error sending Telegram group message part ${part}:`,
+            error
+          );
+        });
+      start += MAX_LEN;
+      part++;
+    }
+  } else {
+    bot
+      .sendMessage(groupId, message)
+      .then(() => {
+        console.log("Telegram group message sent successfully");
+      })
+      .catch((error) => {
+        console.error("Error sending Telegram group message:", error);
+      });
+  }
 }
 
 //随机等待时间
@@ -156,15 +252,25 @@ async function launchBrowserForUser(username, password) {
       args: ["--no-sandbox", "--disable-setuid-sandbox"], // Linux 需要的安全设置
     };
 
-    // 如果环境变量不是 'dev'，则添加代理配置
-    // if (process.env.ENVIRONMENT !== "dev") {
-    // browserOptions["proxy"] = {
-    //   host: "38.154.227.167",
-    //   port: "5868",
-    //   username: "pqxujuyl",
-    //   password: "y1nmb5kjbz9t",
-    // };
-    // }
+    // 添加代理配置到浏览器选项
+    const proxyConfig = getProxyConfig();
+    if (proxyConfig) {
+      const proxyArgs = getPuppeteerProxyArgs(proxyConfig);
+      browserOptions.args.push(...proxyArgs);
+      console.log(
+        `为用户 ${username} 启用代理: ${proxyConfig.type}://${proxyConfig.host}:${proxyConfig.port}`
+      );
+
+      // 如果有用户名密码，puppeteer-real-browser会自动处理
+      if (proxyConfig.username && proxyConfig.password) {
+        browserOptions.proxy = {
+          host: proxyConfig.host,
+          port: proxyConfig.port,
+          username: proxyConfig.username,
+          password: proxyConfig.password,
+        };
+      }
+    }
 
     var { connect } = await import("puppeteer-real-browser");
     const { page, browser: newBrowser } = await connect(browserOptions);
@@ -279,7 +385,7 @@ async function launchBrowserForUser(username, password) {
     });
     // 如果是Linuxdo，就导航到我的帖子，但我感觉这里写没什么用，因为外部脚本已经定义好了，不对，这里不会点击按钮，所以不会跳转，需要手动跳转
     if (loginUrl == "https://linux.do") {
-      await page.goto("https://linux.do/t/topic/13716/700", {
+      await page.goto("https://linux.do/t/topic/13716/790", {
         waitUntil: "domcontentloaded",
       });
     } else if (loginUrl == "https://meta.appinn.net") {
@@ -293,6 +399,58 @@ async function launchBrowserForUser(username, password) {
     }
     if (token && chatId) {
       sendToTelegram(`${username} 登录成功`);
+    } // 监听页面跳转到新话题，自动推送RSS example：https://linux.do/t/topic/525305.rss
+    // 记录已推送过的 topicId，防止重复推送
+    if (enableRssFetch || enableTopicDataFetch) {
+      const pushedTopicIds = new Set();
+      const processedTopicIds = new Set(); // 用于话题数据处理的记录
+      page.on("framenavigated", async (frame) => {
+        if (frame.parentFrame() !== null) return;
+        const url = frame.url();
+        const match = url.match(/https:\/\/linux\.do\/t\/topic\/(\d+)/);
+        if (match) {
+          const topicId = match[1];
+
+          // RSS抓取处理
+          if (enableRssFetch && !pushedTopicIds.has(topicId)) {
+            pushedTopicIds.add(topicId);
+            const rssUrl = `https://linux.do/t/topic/${topicId}.rss`;
+            console.log("检测到话题跳转，抓取RSS：", rssUrl);
+            try {
+              // 停顿1.5秒再抓取
+              await new Promise((r) => setTimeout(r, 1500));
+              const rssPage = await browser.newPage();
+              await rssPage.goto(rssUrl, {
+                waitUntil: "domcontentloaded",
+                timeout: 20000,
+              });
+              // 停顿0.5秒再获取内容，确保页面渲染完成
+              await new Promise((r) => setTimeout(r, 1000));
+              const xml = await rssPage.evaluate(() => document.body.innerText);
+              await rssPage.close();
+              const parsedData = await parseRss(xml);
+              sendToTelegramGroup(parsedData);
+            } catch (e) {
+              console.error("抓取或发送RSS失败：", e, "可能是非公开话题");
+            }
+          }
+
+          // 话题数据抓取处理
+          if (enableTopicDataFetch && !processedTopicIds.has(topicId)) {
+            processedTopicIds.add(topicId);
+            console.log("检测到话题跳转，抓取话题数据：", url);
+            try {
+              // 停顿1秒再处理话题数据
+              await new Promise((r) => setTimeout(r, 1000));
+              await processAndSaveTopicData(page, url);
+            } catch (e) {
+              console.error("抓取或保存话题数据失败：", e);
+            }
+          }
+        }
+        // 停顿0.5秒后允许下次抓取
+        await new Promise((r) => setTimeout(r, 500));
+      });
     }
     return { browser };
   } catch (err) {
@@ -335,7 +493,11 @@ async function login(page, username, password, retryCount = 3) {
       await page.goto(`${loginUrl}/t/topic/1`, {
         waitUntil: "domcontentloaded",
       });
-      await page.click(".discourse-reactions-reaction-button");
+      try {
+        await page.click(".discourse-reactions-reaction-button");
+      } catch (error) {
+        console.log("没有找到点赞按钮，可能是页面没有加载完成或按钮不存在");
+      }
     }
   }
   // 等待用户名输入框加载
@@ -410,7 +572,7 @@ async function navigatePage(url, page, browser) {
   const startTime = Date.now(); // 记录开始时间
   let pageTitle = await page.title(); // 获取当前页面标题
 
-  while (pageTitle.includes("Just a moment")) {
+  while (pageTitle.includes("Just a moment") || pageTitle.includes("请稍候")) {
     console.log("The page is under Cloudflare protection. Waiting...");
 
     await delayClick(2000); // 每次检查间隔2秒
@@ -421,6 +583,7 @@ async function navigatePage(url, page, browser) {
     // 检查是否超过15秒
     if (Date.now() - startTime > 35000) {
       console.log("Timeout exceeded, aborting actions.");
+      sendToTelegram(`超时了,无法通过Cloudflare验证`);
       await browser.close();
       return; // 超时则退出函数
     }
